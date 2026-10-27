@@ -70,10 +70,11 @@ that is 5,689 – 16,665 loops (median run: about 11,000), far more than a 9-day
    `"Reasoning is mandatory for this endpoint and cannot be disabled."` This applies to Muse Spark
    Open and Muse Glimmer 30B. Reasoning tokens are billed as output tokens, and they dominate the
    latency tail (7 → 4,187 reasoning tokens is the difference between 2.6 s and 18.1 s).
-2. **A small `max_tokens` silently returns an empty message.** With `max_tokens: 3000`, one turn
-   spent the whole budget on reasoning and returned no content and no tool call, at 26 s and
-   $0.0228. Rule: `max_tokens >= 8000`, and treat "no content and no tool call" as a **retryable
-   model failure**, never as `CANNOT_REPRODUCE`.
+2. **A small `max_tokens` silently returns an empty message.** Reproduced twice: at
+   `max_tokens: 3000` one turn spent the whole budget on reasoning and returned no content and no
+   tool call, at 26 s and $0.0228; in CI at `max_tokens: 600` one sample came back empty with 375
+   reasoning tokens. Rule: `max_tokens >= 8000`, retry once with 3x the budget, and treat
+   "no content and no tool call" as a **retryable model failure**, never as `CANNOT_REPRODUCE`.
 3. **Rate limits are real.** One turn of an early batch failed with HTTP 429 `Rate limit
    exceeded`. Rule: keep `HF_TOKEN_FALLBACK` wired from the first commit, retry 429/5xx with
    backoff, and record every retry in the receipt.
@@ -82,3 +83,23 @@ that is 5,689 – 16,665 loops (median run: about 11,000), far more than a 9-day
 
 Timeout budget for the runner: 60 s per model call, 2 repair attempts, so worst case per issue
 stays inside ~4 min of model time.
+
+## Repository-level verification (GitHub Actions)
+
+`.github/workflows/kill-gate.yml` (manual dispatch) replays the probes on a fresh runner using the
+two repository secrets. Secrets are injected as `HF_TOKEN` and masked as `***` in the log; no value
+is printed or written to the artifacts.
+
+Run [40491351625](https://github.com/duneon97/evidence-gated-repair/actions/runs/40491351625) —
+**success**:
+
+| Step | Token | Verdict | Notes |
+| --- | --- | --- | --- |
+| Single-turn probe | `HF_TOKEN_MAIN` | PASS | latency median 2.27 s |
+| Single-turn probe | `HF_TOKEN_FALLBACK` | PASS | latency median 1.89 s, so the fallback token is live and usable |
+| Two-turn tool loop | `HF_TOKEN_MAIN` | PASS 2/2 | total $0.0138 |
+
+The first run ([40491120215](https://github.com/duneon97/evidence-gated-repair/actions/runs/40491120215))
+reported `verdict=FAIL` for the main token with `ok_runs: 1` and one `"text": ""`. That was not an
+access problem: `max_tokens: 600` had been consumed by 375 reasoning tokens. The probes now retry an
+empty reply once with three times the budget, which is hardening rule 2 made executable.
