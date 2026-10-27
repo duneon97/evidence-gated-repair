@@ -81,6 +81,33 @@ def post(url: str, key: str, payload: dict, timeout: int = 180) -> tuple[dict, f
         return {"_body": raw[:800]}, elapsed, status
 
 
+def _is_empty(data: dict) -> bool:
+    """True when a 200 response carries neither text nor a tool call.
+
+    Muse Spark bills reasoning tokens as completion tokens; if max_tokens is too small the
+    whole budget goes to reasoning and the message comes back empty. That is a retryable
+    model-side failure, not a verdict about the model.
+    """
+    choice = (data.get("choices") or [{}])[0]
+    msg = choice.get("message") or {}
+    return not (msg.get("content") or "").strip() and not msg.get("tool_calls")
+
+
+def call_with_empty_retry(
+    base: str, key: str, payload: dict, timeout: int = 180, attempts: int = 2
+) -> tuple[dict, float, int, int]:
+    """POST, and retry once with a larger output budget when the reply is empty."""
+    data, elapsed, status = post(f"{base}/chat/completions", key, payload, timeout=timeout)
+    tries = 1
+    while status == 200 and _is_empty(data) and tries < attempts:
+        bigger = dict(payload)
+        bigger["max_tokens"] = min(int(payload.get("max_tokens", 2000)) * 3, 32000)
+        more, spent, status = post(f"{base}/chat/completions", key, bigger, timeout=timeout)
+        data = more
+        elapsed += spent
+        tries += 1
+    return data, elapsed, status, tries
+
 def cost_usd(model: str, usage: dict) -> float | None:
     price = PRICES.get(model)
     if not price or not usage:
@@ -107,16 +134,17 @@ def test_latency(base: str, key: str, model: str, runs: int, reasoning: str = "d
                 {"role": "system", "content": "Answer with one short sentence."},
                 {"role": "user", "content": f"Run {i + 1}: name the pytest flag that stops after the first failure."},
             ],
-            "max_tokens": 600,
+            "max_tokens": 2000,
             "temperature": 0,
             **reasoning_block(reasoning),
         }
-        data, elapsed, status = post(f"{base}/chat/completions", key, payload)
+        data, elapsed, status, tries = call_with_empty_retry(base, key, payload)
         choice = (data.get("choices") or [{}])[0]
         msg = choice.get("message") or {}
         results.append(
             {
                 "status": status,
+                "attempts": tries,
                 "elapsed_s": round(elapsed, 3),
                 "usage": data.get("usage"),
                 "cost_usd": cost_usd(model, data.get("usage")),
@@ -192,11 +220,11 @@ def test_tool_calling(base: str, key: str, model: str, reasoning: str = "default
         ],
         "tools": TOOLS,
         "tool_choice": "auto",
-        "max_tokens": 2000,
+        "max_tokens": 8000,
         "temperature": 0,
         **reasoning_block(reasoning),
     }
-    data, elapsed, status = post(f"{base}/chat/completions", key, payload)
+    data, elapsed, status, tries = call_with_empty_retry(base, key, payload)
     if status != 200:
         return {"ok": False, "status": status, "elapsed_s": round(elapsed, 3), "error": data.get("_body", data)}
     msg = (data.get("choices") or [{}])[0].get("message") or {}
@@ -221,6 +249,7 @@ def test_tool_calling(base: str, key: str, model: str, reasoning: str = "default
         )
     return {
         "ok": bool(parsed) and all(p["valid_json"] for p in parsed),
+        "attempts": tries,
         "status": status,
         "elapsed_s": round(elapsed, 3),
         "finish_reason": (data.get("choices") or [{}])[0].get("finish_reason"),
@@ -273,11 +302,11 @@ def test_structured(base: str, key: str, model: str, reasoning: str = "default")
             },
         ],
         "response_format": {"type": "json_schema", "json_schema": SCHEMA},
-        "max_tokens": 2000,
+        "max_tokens": 8000,
         "temperature": 0,
         **reasoning_block(reasoning),
     }
-    data, elapsed, status = post(f"{base}/chat/completions", key, payload)
+    data, elapsed, status, tries = call_with_empty_retry(base, key, payload)
     if status != 200:
         return {"ok": False, "status": status, "elapsed_s": round(elapsed, 3), "error": data.get("_body", data)}
     msg = (data.get("choices") or [{}])[0].get("message") or {}
@@ -289,6 +318,7 @@ def test_structured(base: str, key: str, model: str, reasoning: str = "default")
         parsed, ok = None, False
     return {
         "ok": ok,
+        "attempts": tries,
         "status": status,
         "elapsed_s": round(elapsed, 3),
         "parsed": parsed,
@@ -333,6 +363,7 @@ def main() -> int:
     ]
     report["reasoning_tokens_per_run"] = reasoning_tokens
 
+    report["latency"]["attempts_per_run"] = [r.get("attempts") for r in report["latency"]["runs"]]
     lat_ok = report["latency"]["ok_runs"] == args.runs
     report["verdict"] = (
         "PASS"
