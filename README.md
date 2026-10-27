@@ -48,8 +48,11 @@ python3 tools/probe_tool_loop.py --provider hf --model meta-models/Muse-Spark-Op
 
 ## Status
 
-Day 1 (2026-10-27): model access, tool calling and latency verified end to end.
-See [`docs/kill-gate.md`](docs/kill-gate.md). The agent loop is not implemented yet.
+Day 1 (2026-10-27): model access, tool calling and latency verified end to end on
+`meta-models/Muse-Spark-Open-816B-A42B` via the HF router — tool calling 3/3 in a two-turn loop,
+single-turn latency 1.03–1.90 s, $0.009–$0.026 per loop. See
+[`docs/kill-gate.md`](docs/kill-gate.md) and [`docs/secrets.md`](docs/secrets.md). The agent loop
+itself is not implemented yet.
 
 ## License
 

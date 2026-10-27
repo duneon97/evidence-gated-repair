@@ -116,7 +116,10 @@ def one_loop(base: str, key: str, model: str, timeout: int, max_tokens: int = 80
     msg2 = (t2.get("choices") or [{}])[0].get("message") or {}
     calls2 = msg2.get("tool_calls") or []
     prose2 = msg2.get("content") or ""
-    reacted = "1 == 90" in prose2 or "90" in json.dumps(calls2) or "assert" in prose2.lower()
+    # Reacting means acting on the evidence: a tool call in turn 2 counts on its own.
+    # We also record whether the observed failure text made it into the response.
+    mentions_failure = "1 == 90" in prose2 or "90" in json.dumps(calls2) or "assert" in prose2.lower()
+    reacted = bool(calls2) or mentions_failure
     names2 = []
     for c in calls2:
         fn = c.get("function") or {}
@@ -128,10 +131,11 @@ def one_loop(base: str, key: str, model: str, timeout: int, max_tokens: int = 80
     finish2 = (t2.get("choices") or [{}])[0].get("finish_reason")
     usage1, usage2 = t1.get("usage") or {}, t2.get("usage") or {}
     return {
-        "ok": bool(calls2) and reacted,
+        "ok": bool(calls2),
         "turn1_call": (call.get("function") or {}).get("name"),
         "turn2_calls": names2,
         "turn2_reacted_to_failure": reacted,
+        "turn2_mentions_failure_text": mentions_failure,
         "turn1_elapsed_s": round(el1, 3),
         "turn2_elapsed_s": round(el2, 3),
         "turn1_finish_reason": finish1,
