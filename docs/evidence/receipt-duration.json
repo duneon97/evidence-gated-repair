@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "verdict": "VERIFIED",
+  "reason": "frozen test passes and the suite has no new failures",
+  "issue_sha256": "b75e2de348436a1e58bb58592d2f9b157b4d6c8016958d03f9995672cdfe4dda",
+  "repo": {
+    "path": "/data/workspace/evidence-gated-repair/fixtures/tinybug",
+    "commit": "3f3d409579b43d73d9616b57b5be0affa95da001"
+  },
+  "model": {
+    "id": "meta-models/Muse-Spark-Open-816B-A42B",
+    "base_url": "https://router.huggingface.co/v1"
+  },
+  "runner": {
+    "kind": "docker",
+    "image": "repairgate-sandbox:py313",
+    "network": "none"
+  },
+  "test_file": "tests/test_regression_duration_minutes.py",
+  "test_sha256_frozen": "dba73128d0abc766f37ed428a3b852037b8a999e36c658a65c6c3f1e2f37dfad",
+  "test_sha256_after": "dba73128d0abc766f37ed428a3b852037b8a999e36c658a65c6c3f1e2f37dfad",
+  "attempts": [
+    {
+      "n": 1,
+      "summary": "Fixed parse_duration to handle minutes-only and combined h+m durations case-insensitively via regex with IGNORECASE, validating at least one unit present and raising ValueError/TypeError as documented.",
+      "files": [
+        "src/duration.py"
+      ],
+      "rejected": null,
+      "gate": {
+        "frozen_test_passed": true,
+        "frozen_exit_code": 0,
+        "new_failures": [],
+        "suite_exit_code": 0
+      }
+    }
+  ],
+  "model_calls": [
+    {
+      "label": "queries",
+      "round": 1,
+      "key_env": "HF_TOKEN_MAIN",
+      "key_present": true,
+      "http_status": 200,
+      "elapsed_s": 3.05,
+      "prompt_tokens": 464,
+      "completion_tokens": 672
+    },
+    {
+      "label": "write_test",
+      "round": 1,
+      "key_env": "HF_TOKEN_MAIN",
+      "key_present": true,
+      "http_status": 200,
+      "elapsed_s": 10.78,
+      "prompt_tokens": 1003,
+      "completion_tokens": 2342
+    },
+    {
+      "label": "patch_attempt_1",
+      "round": 1,
+      "key_env": "HF_TOKEN_MAIN",
+      "key_present": true,
+      "http_status": 200,
+      "elapsed_s": 22.13,
+      "prompt_tokens": 1188,
+      "completion_tokens": 8000
+    },
+    {
+      "label": "patch_attempt_1",
+      "round": 1,
+      "key_env": "HF_TOKEN_FALLBACK",
+      "key_present": true,
+      "http_status": 200,
+      "elapsed_s": 14.85,
+      "prompt_tokens": 1188,
+      "completion_tokens": 3292
+    }
+  ],
+  "commands": [
+    {
+      "label": "baseline_regression_test",
+      "command": "docker run --rm --network none --cpus 1 --memory 1g --pids-limit 256 -v /data/workspace/evidence-gated-repair/fixtures/.repair-work-1793101282/baseline:/work -w /work repairgate-sandbox:py313 python -m pytest -q --tb=short tests/test_regression_duration_minutes.py",
+      "exit_code": 1,
+      "timed_out": false,
+      "elapsed_s": 0.51,
+      "stdout_tail": "F                                                                        [100%]\n=================================== FAILURES ===================================\n_____________ test_parse_duration_minutes_and_combined_regression ______________\ntests/test_regression_duration_minutes.py:7: in test_parse_duration_minutes_and_combined_regression\n    assert parse_duration(\"90m\") == 5400\nsrc/duration.py:19: in parse_duration\n    raise ValueError(f\"invalid duration: {text!r}\")\nE   ValueError: invalid duration: '90m'\n=============================== warnings summary ===============================\n../usr/local/lib/python3.13/site-packages/_pytest/cacheprovider.py:475\n  /usr/local/lib/python3.13/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /work/.pytest_cache/v/cache/nodeids: [Errno 13] Permission denied: '/work/pytest-cache-files-2evsm4qs'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n../usr/local/lib/python3.13/site-packages/_pytest/cacheprovider.py:429\n  /usr/local/lib/python3.13/site-packages/_pytest/cacheprovider.py:429: PytestCacheWarning: could not create cache path /work/.pytest_cache/v/cache/lastfailed: [Errno 13] Permission denied: '/work/pytest-cache-files-xcmq_t8m'\n    config.cache.set(\"cache/lastfailed\", self.lastfailed)\n\n../usr/local/lib/python3.13/site-packages/_pytest/stepwise.py:51\n  /usr/local/lib/python3.13/site-packages/_pytest/stepwise.py:51: PytestCacheWarning: could not create cache path /work/.pytest_cache/v/cache/stepwise: [Errno 13] Permission denied: '/work/pytest-cache-files-wdz28_sd'\n    session.config.cache.set(STEPWISE_CACHE_DIR, [])\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_regression_duration_minutes.py::test_parse_duration_minutes_and_combined_regression\n1 failed, 3 warnings in 0.01s\n",
+      "stderr_tail": ""
+    },
+    {
+      "label": "baseline_suite",
+      "command": "docker run --rm --network none --cpus 1 --memory 1g --pids-limit 256 -v /data/workspace/evidence-gated-repair/fixtures/.repair-work-1793101282/baseline:/work -w /work repairgate-sandbox:py313 python -m pytest -q --tb=no -rf",
+      "exit_code": 1,
+      "timed_out": false,
+      "elapsed_s": 0.51,
+      "stdout_tail": ".....F                                                                   [100%]\n=============================== warnings summary ===============================\n../usr/local/lib/python3.13/site-packages/_pytest/cacheprovider.py:475\n  /usr/local/lib/python3.13/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /work/.pytest_cache/v/cache/nodeids: [Errno 13] Permission denied: '/work/pytest-cache-files-vwluob_t'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n../usr/local/lib/python3.13/site-packages/_pytest/cacheprovider.py:429\n  /usr/local/lib/python3.13/site-packages/_pytest/cacheprovider.py:429: PytestCacheWarning: could not create cache path /work/.pytest_cache/v/cache/lastfailed: [Errno 13] Permission denied: '/work/pytest-cache-files-8vnthjex'\n    config.cache.set(\"cache/lastfailed\", self.lastfailed)\n\n../usr/local/lib/python3.13/site-packages/_pytest/stepwise.py:51\n  /usr/local/lib/python3.13/site-packages/_pytest/stepwise.py:51: PytestCacheWarning: could not create cache path /work/.pytest_cache/v/cache/stepwise: [Errno 13] Permission denied: '/work/pytest-cache-files-ffqu3g3l'\n    session.config.cache.set(STEPWISE_CACHE_DIR, [])\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n=========================== short test summary info ============================\nFAILED tests/test_regression_duration_minutes.py::test_parse_duration_minutes_and_combined_regression\n1 failed, 5 passed, 3 warnings in 0.01s\n",
+      "stderr_tail": ""
+    },
+    {
+      "label": "candidate_1_frozen_test",
+      "command": "docker run --rm --network none --cpus 1 --memory 1g --pids-limit 256 -v /data/workspace/evidence-gated-repair/fixtures/.repair-work-1793101282/candidate_1:/work -w /work repairgate-sandbox:py313 python -m pytest -q --tb=short tests/test_regression_duration_minutes.py",
+      "exit_code": 0,
+      "timed_out": false,
+      "elapsed_s": 0.5,
+      "stdout_tail": ".                                                                        [100%]\n=============================== warnings summary ===============================\n../usr/local/lib/python3.13/site-packages/_pytest/cacheprovider.py:475\n  /usr/local/lib/python3.13/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /work/.pytest_cache/v/cache/nodeids: [Errno 13] Permission denied: '/work/pytest-cache-files-f339dqq7'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n../usr/local/lib/python3.13/site-packages/_pytest/stepwise.py:51\n  /usr/local/lib/python3.13/site-packages/_pytest/stepwise.py:51: PytestCacheWarning: could not create cache path /work/.pytest_cache/v/cache/stepwise: [Errno 13] Permission denied: '/work/pytest-cache-files-lqd_a1p8'\n    session.config.cache.set(STEPWISE_CACHE_DIR, [])\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n1 passed, 2 warnings in 0.01s\n",
+      "stderr_tail": ""
+    },
+    {
+      "label": "candidate_1_suite",
+      "command": "docker run --rm --network none --cpus 1 --memory 1g --pids-limit 256 -v /data/workspace/evidence-gated-repair/fixtures/.repair-work-1793101282/candidate_1:/work -w /work repairgate-sandbox:py313 python -m pytest -q --tb=no -rf",
+      "exit_code": 0,
+      "timed_out": false,
+      "elapsed_s": 0.5,
+      "stdout_tail": "......                                                                   [100%]\n=============================== warnings summary ===============================\n../usr/local/lib/python3.13/site-packages/_pytest/cacheprovider.py:475\n  /usr/local/lib/python3.13/site-packages/_pytest/cacheprovider.py:475: PytestCacheWarning: could not create cache path /work/.pytest_cache/v/cache/nodeids: [Errno 13] Permission denied: '/work/pytest-cache-files-vza1_mj7'\n    config.cache.set(\"cache/nodeids\", sorted(self.cached_nodeids))\n\n../usr/local/lib/python3.13/site-packages/_pytest/stepwise.py:51\n  /usr/local/lib/python3.13/site-packages/_pytest/stepwise.py:51: PytestCacheWarning: could not create cache path /work/.pytest_cache/v/cache/stepwise: [Errno 13] Permission denied: '/work/pytest-cache-files-ehx931z6'\n    session.config.cache.set(STEPWISE_CACHE_DIR, [])\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n6 passed, 2 warnings in 0.01s\n",
+      "stderr_tail": ""
+    }
+  ],
+  "limits": {
+    "max_attempts": 2,
+    "test_timeout_s": 180
+  },
+  "started_at": "2026-10-27T11:41:22Z",
+  "search": {
+    "queries": [
+      "parse_duration",
+      "invalid duration",
+      "ValueError",
+      "TypeError"
+    ],
+    "files": [
+      "ISSUE.md",
+      "README.md",
+      "src/duration.py",
+      "tests/test_duration.py"
+    ]
+  },
+  "baseline": {
+    "genuine": true,
+    "reason": "assertion_failure",
+    "suite_failures": [
+      "tests/test_regression_duration_minutes.py::test_parse_duration_minutes_and_combined_regression"
+    ]
+  },
+  "candidate_dir": "/data/workspace/evidence-gated-repair/fixtures/.repair-work-1793101282/candidate_1",
+  "diff": ".../{baseline => candidate_1}/src/duration.py      | 26 +++++++++-------------\n 1 file changed, 11 insertions(+), 15 deletions(-)",
+  "finished_at": "2026-10-27T11:42:15Z"
+}
