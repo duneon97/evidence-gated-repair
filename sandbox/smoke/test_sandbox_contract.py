@@ -17,6 +17,11 @@ import socket
 
 import pytest
 
+pytestmark = pytest.mark.skipif(
+    os.environ.get("REPAIRGATE_SANDBOX_CONTRACT") != "1",
+    reason="Docker-only contract; run inside the sandbox image, not on the host",
+)
+
 
 def test_runs_unprivileged() -> None:
     assert os.geteuid() != 0, "the test process must not be root"
@@ -28,7 +33,8 @@ def test_network_is_blocked() -> None:
 
 
 def test_no_agent_secrets_in_env() -> None:
-    leaked = [k for k in os.environ if k.startswith("HF_TOKEN") or k.startswith("SSH_")]
+    leaked = [k for k in os.environ
+              if k.startswith(("HF_TOKEN", "LLAMA_API_KEY", "SSH_"))]
     assert leaked == [], f"secrets leaked into the sandbox: {leaked}"
 
 

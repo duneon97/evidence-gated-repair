@@ -12,7 +12,7 @@ The agent is not trusted. Every claim it makes has to survive execution:
   4. up to --max-attempts patches: the model proposes full-file contents, we apply them in a
      disposable copy and run the frozen test plus the whole suite inside the sandbox
   5. the gate says VERIFIED only when the frozen test passes, the suite has no new failures,
-     and both hashes are unchanged. Anything else is NEEDS_REVIEW with the evidence attached.
+     and test hashes are unchanged after execution. Anything else is NEEDS_REVIEW.
 
 Output: one `receipt.json` plus a one-line verdict on stdout. No UI, no server.
 
@@ -20,7 +20,7 @@ Usage:
     python -m agent.repair --repo fixtures/tinybug --issue fixtures/tinybug/ISSUE.md \
         --out receipt.json --runner docker
 
-Secrets are read from --env-file (default /data/.env) and are never logged or written
+Secrets are read from the environment or --env-file (default .env), never logged or written
 into the receipt: only the variable name and a boolean are recorded.
 """
 
@@ -32,18 +32,25 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+from agent.mock import MockModelClient, SCENARIOS
+
+SCHEMA_VERSION = 2
 MAX_TOKENS = 8000
 HTTP_TIMEOUT = 150
 MAX_CONTEXT_CHARS = 7000
 IGNORE_DIRS = {".git", "__pycache__", ".pytest_cache", ".venv", "venv", "node_modules", ".mypy_cache"}
+DEFAULT_MODEL = "meta-llama/Llama-3.3-70B-Instruct"
+HF_BASE_URL = "https://router.huggingface.co/v1"
 
 VERIFIED = "VERIFIED"
 NEEDS_REVIEW = "NEEDS_REVIEW"
@@ -97,20 +104,22 @@ def repo_files(root: Path) -> dict[str, str]:
 
 
 # --------------------------------------------------------------------------------------
-# model client: HF router, two tokens, no key ever printed
+# model client: real HF and native Meta endpoints, or an explicit offline mock
 # --------------------------------------------------------------------------------------
 class ModelError(RuntimeError):
     pass
 
 
 class ModelClient:
-    def __init__(self, base_url: str, model: str, tokens: list[tuple[str, str]], receipt: dict):
+    def __init__(self, base_url: str, model: str, tokens: list[tuple[str, str]], receipt: dict,
+                 provider: str = "hf"):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.tokens = [t for t in tokens if t[1]]
         self.receipt = receipt
+        self.provider = provider
         if not self.tokens:
-            raise ModelError("no token available in env file")
+            raise ModelError("no provider credential configured")
 
     def _post(self, payload: dict, token: str, timeout: int) -> tuple[int, dict]:
         req = urllib.request.Request(
@@ -129,15 +138,18 @@ class ModelClient:
             except json.JSONDecodeError:
                 parsed = {"raw": body[:400]}
             return exc.code, parsed
-        except Exception as exc:  # noqa: BLE001 - network errors are data, not crashes
-            return 0, {"raw": f"{type(exc).__name__}: {exc}"}
+        except Exception:  # noqa: BLE001 - do not expose credential-bearing URLs/errors
+            return 0, {}
 
     def chat(self, messages: list[dict], *, max_tokens: int = MAX_TOKENS, temperature: float = 0.2,
              label: str = "chat") -> str:
+        # Meta's native API uses max_completion_tokens and completion_message,
+        # unlike the HF router's OpenAI-compatible request/response schema.
+        budget_key = "max_completion_tokens" if self.provider == "llama" else "max_tokens"
         payload = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": max_tokens,
+            budget_key: max_tokens,
             "temperature": temperature,
         }
         last_error = "no attempt made"
@@ -147,8 +159,12 @@ class ModelClient:
                 status, body = self._post(payload, token, HTTP_TIMEOUT)
                 elapsed = round(now() - started, 2)
                 usage = body.get("usage") or {}
-                message = ((body.get("choices") or [{}])[0].get("message") or {})
-                content = (message.get("content") or "").strip()
+                message = (body.get("completion_message")
+                           or ((body.get("choices") or [{}])[0].get("message") or {}))
+                content = message.get("content") or ""
+                if isinstance(content, dict):
+                    content = content.get("text", "")
+                content = content.strip() if isinstance(content, str) else ""
                 self.receipt["model_calls"].append(
                     {
                         "label": label,
@@ -165,10 +181,11 @@ class ModelClient:
                     return content
                 if status == 200 and not content:
                     # reasoning ate the whole budget: retry with a bigger one, same token
-                    payload["max_tokens"] = min(payload["max_tokens"] * 3, 32000)
+                    payload[budget_key] = min(payload[budget_key] * 3, 32000)
                     last_error = "empty content (reasoning consumed max_tokens)"
                     continue
-                last_error = f"HTTP {status}: {json.dumps(body)[:200]}"
+                # Provider error bodies can echo credentials or private endpoint details.
+                last_error = f"HTTP {status}"
                 if status in (401, 403):
                     continue  # try the other token
                 if status in (429, 500, 502, 503, 504) or status == 0:
@@ -176,6 +193,39 @@ class ModelClient:
                 raise ModelError(last_error)
             time.sleep(min(2 ** round_no, 8))
         raise ModelError(f"all tokens failed: {last_error}")
+
+
+def create_client(args: argparse.Namespace, receipt: dict) -> ModelClient | MockModelClient:
+    """CLI overrides process environment, which overrides nonempty dotenv settings."""
+    env = {k: v for k, v in load_env(args.env_file).items() if v}
+    env.update({k: v for k, v in os.environ.items() if v})
+    provider = args.provider or env.get("MODEL_PROVIDER", "hf")
+    if provider not in {"hf", "llama", "mock"}:
+        raise ModelError("MODEL_PROVIDER must be hf, llama, or mock")
+    receipt["model"] = {"provider": provider, "mode": "mock" if provider == "mock" else "live"}
+    if provider == "mock":
+        receipt["model"].update({"id": "fixture-mock-v1", "scenario": args.mock_scenario})
+        return MockModelClient(args.mock_scenario, receipt)
+    if args.mock_scenario != "good_patch":
+        raise ModelError("--mock-scenario requires --provider mock")
+    if provider == "hf":
+        model = args.model or env.get("MODEL_ID", DEFAULT_MODEL)
+        base_url = args.base_url or env.get("HF_BASE_URL", HF_BASE_URL)
+        tokens = [(key, env.get(key, "")) for key in ("HF_TOKEN_MAIN", "HF_TOKEN_FALLBACK")]
+    else:
+        model = args.model or env.get("MODEL_ID")
+        base_url = args.base_url or env.get("LLAMA_API_BASE")
+        tokens = [("LLAMA_API_KEY", env.get("LLAMA_API_KEY", ""))]
+        if not model or not base_url:
+            raise ModelError("llama requires MODEL_ID and LLAMA_API_BASE (or CLI overrides)")
+    # Never put configurable endpoint URLs in receipts.
+    receipt["model"]["id"] = model
+    if not base_url.startswith("https://"):
+        raise ModelError("live provider base URL must use HTTPS")
+    if not any(token for _, token in tokens):
+        required = "HF_TOKEN_MAIN / HF_TOKEN_FALLBACK" if provider == "hf" else "LLAMA_API_KEY"
+        raise ModelError(f"no credential configured: set {required}; live mode never uses mock")
+    return ModelClient(base_url, model, tokens, receipt, provider=provider)
 
 
 def parse_json_reply(text: str) -> dict:
@@ -189,13 +239,17 @@ def parse_json_reply(text: str) -> dict:
     return json.loads(text[start : end + 1])
 
 
-def ask_json(client: ModelClient, messages: list[dict], label: str, retries: int = 1) -> dict:
+def ask_json(client: ModelClient | MockModelClient, messages: list[dict],
+             label: str, retries: int = 1) -> dict:
     prompt = list(messages)
     last: Exception | None = None
     for attempt in range(retries + 1):
         reply = client.chat(prompt, label=f"{label}{'' if attempt == 0 else f'+repair{attempt}'}")
         try:
-            return parse_json_reply(reply)
+            parsed = parse_json_reply(reply)
+            if not isinstance(parsed, dict):
+                raise ValueError("reply must be an object")
+            return parsed
         except (ValueError, json.JSONDecodeError) as exc:
             last = exc
             prompt = prompt + [
@@ -261,33 +315,58 @@ def build_context(files: dict[str, str], budget: int = MAX_CONTEXT_CHARS) -> str
 # --------------------------------------------------------------------------------------
 class Runner:
     def __init__(self, kind: str, image: str, receipt: dict):
+        if kind not in {"docker", "local"}:
+            raise ValueError("runner must be docker or local")
         self.kind = kind
         self.image = image
         self.receipt = receipt
 
     def run(self, work: Path, args: list[str], timeout: int, label: str) -> dict:
+        container_name = f"repairgate-{uuid.uuid4().hex}"
         if self.kind == "docker":
             cmd = [
-                "docker", "run", "--rm", "--network", "none",
+                "docker", "run", "--rm", "--name", container_name, "--network", "none",
                 "--cpus", "1", "--memory", "1g", "--pids-limit", "256",
                 "-v", f"{work}:/work", "-w", "/work",
                 self.image, *args,
             ]
         else:
-            cmd = args
+            # Use the interpreter containing the installed pytest, not an arbitrary `python`.
+            cmd = [sys.executable if args[0] == "python" else args[0], *args[1:]]
+        env = None
+        if self.kind == "local":
+            # Hygiene only, NOT a sandbox: code can still read host files and use the network.
+            env = {
+                "PATH": os.environ.get("PATH", os.defpath),
+                # Preserve user-site Python dependencies installed by `pip --user`.
+                "HOME": str(Path.home()), "LANG": "C.UTF-8",
+                "PYTHONDONTWRITEBYTECODE": "1", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+            }
         started = now()
         timed_out = False
         try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout,
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 cwd=None if self.kind == "docker" else str(work),
+                env=env, start_new_session=True,
             )
-            stdout, stderr, code = proc.stdout, proc.stderr, proc.returncode
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else ""
-            stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else ""
-            code = 124
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+                code = proc.returncode
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                os.killpg(proc.pid, signal.SIGKILL)
+                if self.kind == "docker":
+                    # Killing the Docker CLI alone does not stop the test container.
+                    try:
+                        subprocess.run(["docker", "rm", "-f", container_name],
+                                       capture_output=True, timeout=20)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass  # still return a failed/timeout receipt, never VERIFIED
+                stdout, stderr = proc.communicate()
+                code = 124
+        except OSError:
+            stdout, stderr, code = "", "runner could not start; check executable/daemon availability", 127
         record = {
             "label": label,
             "command": " ".join(cmd),
@@ -381,14 +460,17 @@ Reply with JSON: {{"summary": "...", "files": [{{"path": "src/...", "content": "
 # --------------------------------------------------------------------------------------
 def copy_repo(src: Path, dst: Path) -> None:
     def ignore(_dir: str, names: list[str]) -> set[str]:
-        return {n for n in names if n in IGNORE_DIRS}
+        return {n for n in names if n in IGNORE_DIRS
+                or n == ".env" or (n.startswith(".env.") and n != ".env.example")}
 
     shutil.copytree(src, dst, ignore=ignore)
 
 
 def safe_join(root: Path, rel: str) -> Path:
+    if not rel or Path(rel).is_absolute():
+        raise ValueError("path must be nonempty and relative")
     target = (root / rel).resolve()
-    if not str(target).startswith(str(root.resolve())):
+    if not target.is_relative_to(root.resolve()):
         raise ValueError(f"path escapes the work copy: {rel}")
     return target
 
@@ -403,8 +485,12 @@ def run_issue(args: argparse.Namespace) -> dict:
         "reason": None,
         "issue_sha256": sha256_text(issue),
         "repo": {"path": str(repo), "commit": git_commit(repo)},
-        "model": {"id": args.model, "base_url": args.base_url},
-        "runner": {"kind": args.runner, "image": args.image, "network": "none"},
+        "model": {},
+        "runner": {
+            "kind": args.runner, "image": args.image if args.runner == "docker" else None,
+            "sandbox": args.runner == "docker",
+            "network": "none" if args.runner == "docker" else "host (NOT a sandbox)",
+        },
         "test_file": None,
         "test_sha256_frozen": None,
         "test_sha256_after": None,
@@ -415,18 +501,28 @@ def run_issue(args: argparse.Namespace) -> dict:
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started)),
     }
 
-    env = load_env(args.env_file)
-    tokens = [("HF_TOKEN_MAIN", env.get("HF_TOKEN_MAIN", "")),
-              ("HF_TOKEN_FALLBACK", env.get("HF_TOKEN_FALLBACK", ""))]
-    if not any(t[1] for t in tokens):
-        raise SystemExit(f"no HF token found in {args.env_file} (expected HF_TOKEN_MAIN)")
-    client = ModelClient(args.base_url, args.model, tokens, receipt)
+    try:
+        return execute_issue(args, receipt, repo, issue)
+    except ModelError as exc:
+        return finish(receipt, NEEDS_REVIEW, str(exc))
+    except (OSError, ValueError) as exc:
+        return finish(receipt, NEEDS_REVIEW, f"invalid workspace or model response ({type(exc).__name__})")
+
+
+def execute_issue(args: argparse.Namespace, receipt: dict, repo: Path, issue: str) -> dict:
+    client = create_client(args, receipt)
     runner = Runner(args.runner, args.image, receipt)
 
-    work_root = Path(args.work_dir or (repo.parent / f".repair-work-{int(started)}"))
-    if work_root.exists():
-        shutil.rmtree(work_root)
-    work_root.mkdir(parents=True)
+    if args.work_dir:
+        work_root = Path(args.work_dir).resolve()
+        if work_root.is_relative_to(repo):
+            raise ValueError("work directory must be outside the target repository")
+        # Never erase an existing work directory, even if it looks generated.
+        work_root.mkdir(parents=True, exist_ok=False)
+    else:
+        work_root = Path(tempfile.mkdtemp(prefix=".repair-work-", dir=repo.parent))
+        work_root.chmod(0o755)  # the Docker non-root user must be able to traverse the mount
+    receipt["work_dir"] = str(work_root)
     baseline = work_root / "baseline"
     copy_repo(repo, baseline)
     baseline_tests = repo_files(baseline)
@@ -438,6 +534,8 @@ def run_issue(args: argparse.Namespace) -> dict:
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content": QUERY_PROMPT.format(issue=issue[:4000], paths="\n".join(paths[:200]))},
     ], label="queries")
+    if not isinstance(query_reply.get("queries"), list):
+        raise ModelError("queries: expected a list of search strings")
     queries = [q for q in (query_reply.get("queries") or []) if isinstance(q, str)][:4]
     hits = search_repo(baseline, queries)
     context = build_context(hits)
@@ -456,14 +554,23 @@ def run_issue(args: argparse.Namespace) -> dict:
         return finish(receipt, CANNOT_REPRODUCE, "model did not return a usable regression test")
     receipt["test_file"] = test_path
     target = safe_join(baseline, test_path)
+    test_path = target.relative_to(baseline).as_posix()
+    if not test_path.startswith("tests/") or target.exists():
+        return finish(receipt, CANNOT_REPRODUCE, "regression test must be a new file under tests/")
+    receipt["test_file"] = test_path
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(test_content, encoding="utf-8")
     frozen_sha = sha256_bytes(target.read_bytes())
     receipt["test_sha256_frozen"] = frozen_sha
+    receipt["test_sha256_after"] = frozen_sha
 
     baseline_run = runner.run(baseline, ["python", "-m", "pytest", "-q", "--tb=short", test_path],
                               args.timeout, "baseline_regression_test")
     genuine, why = genuine_reproduction(baseline_run["stdout"] + baseline_run["stderr"])
+    if (baseline_run["timed_out"] or baseline_run["exit_code"] not in (0, 1, 2, 5)
+            or "No module named pytest" in baseline_run["stderr"]):
+        return finish(receipt, NEEDS_REVIEW, "baseline runner failed or timed out; no reproduction evidence")
+    genuine = genuine and baseline_run["exit_code"] == 1
     receipt["baseline"] = {"genuine": genuine, "reason": why}
     if not genuine:
         return finish(receipt, CANNOT_REPRODUCE, f"regression test did not reproduce the bug ({why})")
@@ -471,6 +578,8 @@ def run_issue(args: argparse.Namespace) -> dict:
     # baseline suite state, so we can tell new failures from pre-existing ones
     suite_base = runner.run(baseline, ["python", "-m", "pytest", "-q", "--tb=no", "-rf"],
                             args.timeout, "baseline_suite")
+    if suite_base["timed_out"] or suite_base["exit_code"] not in (0, 1):
+        return finish(receipt, NEEDS_REVIEW, "baseline suite could not complete")
     baseline_failures = failed_ids(suite_base["stdout"])
     receipt["baseline"]["suite_failures"] = sorted(baseline_failures)
 
@@ -483,6 +592,8 @@ def run_issue(args: argparse.Namespace) -> dict:
                 issue=issue[:3000], context=context, test_content=test_content[:3000], evidence=evidence)},
         ], label=f"patch_attempt_{attempt}")
         files = patch_reply.get("files") or []
+        if not isinstance(files, list):
+            raise ModelError("patch: expected a list of files")
         attempt_rec: dict = {"n": attempt, "summary": patch_reply.get("summary"), "files": [],
                              "rejected": None, "gate": None}
 
@@ -490,15 +601,26 @@ def run_issue(args: argparse.Namespace) -> dict:
         copy_repo(baseline, candidate)
         rejected = None
         for item in files:
+            if not isinstance(item, dict):
+                rejected = "malformed file entry"
+                break
             rel = str(item.get("path") or "")
             content = item.get("content")
             if not rel or not isinstance(content, str):
                 rejected = "malformed file entry"
                 break
-            if rel == test_path or rel in baseline_tests:
+            try:
+                dest = safe_join(candidate, rel)
+            except ValueError:
+                rejected = "patch path escapes the work copy"
+                break
+            rel = dest.relative_to(candidate).as_posix()
+            if rel == test_path or rel in baseline_tests or "tests" in Path(rel).parts:
                 rejected = f"patch tried to modify a frozen test: {rel}"
                 break
-            dest = safe_join(candidate, rel)
+            if dest.name in {"conftest.py", "pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini"}:
+                rejected = f"patch tried to modify test execution configuration: {rel}"
+                break
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(content, encoding="utf-8")
             attempt_rec["files"].append(rel)
@@ -529,27 +651,41 @@ def run_issue(args: argparse.Namespace) -> dict:
                                args.timeout, f"candidate_{attempt}_suite")
         cand_failures = failed_ids(suite_run["stdout"])
         new_failures = sorted(cand_failures - baseline_failures)
+        # The candidate can execute arbitrary Python, so a pre-run hash alone is insufficient.
+        try:
+            frozen_after = sha256_bytes(safe_join(candidate, test_path).read_bytes())
+        except (OSError, ValueError):
+            frozen_after = None
+        after_tests = repo_files(candidate)
         gate = {
-            "frozen_test_passed": test_run["exit_code"] == 0,
+            "frozen_test_passed": test_run["exit_code"] == 0 and not test_run["timed_out"],
             "frozen_exit_code": test_run["exit_code"],
+            "frozen_hash_unchanged": frozen_after == frozen_sha,
+            "baseline_tests_unchanged": all(after_tests.get(p) == h for p, h in baseline_tests.items()),
             "new_failures": new_failures,
             "suite_exit_code": suite_run["exit_code"],
+            "suite_completed": not suite_run["timed_out"] and suite_run["exit_code"] in (0, 1),
         }
         attempt_rec["gate"] = gate
         receipt["attempts"].append(attempt_rec)
-        receipt["test_sha256_after"] = frozen_now
+        receipt["test_sha256_after"] = frozen_after
 
-        if gate["frozen_test_passed"] and not new_failures:
+        if (gate["frozen_test_passed"] and gate["frozen_hash_unchanged"]
+                and gate["baseline_tests_unchanged"] and gate["suite_completed"]
+                and suite_run["exit_code"] == 0 and not new_failures):
             receipt["candidate_dir"] = str(candidate)
             receipt["diff"] = git_diff(baseline, candidate)
-            return finish(receipt, VERIFIED, "frozen test passes and the suite has no new failures")
+            return finish(receipt, VERIFIED, "frozen test and full suite pass; test hashes unchanged")
 
-        if not gate["frozen_test_passed"]:
+        if not gate["frozen_hash_unchanged"] or not gate["baseline_tests_unchanged"]:
+            attempt_rec["rejected"] = "test hashes changed during execution"
+            evidence = "The candidate modified or deleted a test during execution; this is forbidden."
+        elif not gate["frozen_test_passed"]:
             evidence = ("the frozen test still failed:\n"
                         + tail(test_run["stdout"] + test_run["stderr"], 1800))
         else:
-            evidence = ("the frozen test passed but the suite regressed in: "
-                        + ", ".join(new_failures[:5]))
+            evidence = ("the frozen test passed but the full suite did not pass:\n"
+                        + tail(suite_run["stdout"] + suite_run["stderr"], 1800))
 
     return finish(receipt, NEEDS_REVIEW, "no attempt satisfied the gate; inspect the receipt")
 
@@ -586,18 +722,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", required=True)
     parser.add_argument("--issue", required=True)
     parser.add_argument("--out", default="receipt.json")
-    parser.add_argument("--runner", choices=("docker", "local"), default="docker")
+    parser.add_argument("--runner", choices=("docker", "local"), default="docker",
+                        help="docker (default) or local subprocess, NOT a sandbox")
     parser.add_argument("--image", default="repairgate-sandbox:py313")
-    parser.add_argument("--model", default="meta-models/Muse-Spark-Open-816B-A42B")
-    parser.add_argument("--base-url", default="https://router.huggingface.co/v1")
-    parser.add_argument("--env-file", default="/data/.env")
-    parser.add_argument("--max-attempts", type=int, default=2)
+    parser.add_argument("--provider", choices=("hf", "llama", "mock"), default=None,
+                        help="MODEL_PROVIDER env, otherwise hf; mock is offline and explicit")
+    parser.add_argument("--mock-scenario", choices=SCENARIOS, default="good_patch")
+    parser.add_argument("--model", default=None, help="MODEL_ID env, otherwise Meta Llama on HF")
+    parser.add_argument("--base-url", default=None, help="HF_BASE_URL or LLAMA_API_BASE env")
+    parser.add_argument("--env-file", default=".env")
+    parser.add_argument("--max-attempts", type=int, choices=(1, 2), default=2)
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--work-dir", default=None)
     args = parser.parse_args(argv)
 
+    if args.runner == "local":
+        print("WARNING: --runner local is NOT a sandbox. Trusted code only; host/network access remains.",
+              file=sys.stderr)
     receipt = run_issue(args)
-    Path(args.out).write_text(json.dumps(receipt, indent=2, ensure_ascii=False), encoding="utf-8")
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(receipt, indent=2, ensure_ascii=False), encoding="utf-8")
     model_calls = len(receipt.get("model_calls") or [])
     print(f"{receipt['verdict']}: {receipt['reason']} "
           f"(model_calls={model_calls}, attempts={len(receipt.get('attempts') or [])}, "

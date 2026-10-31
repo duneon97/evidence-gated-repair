@@ -26,6 +26,7 @@ build/
 # Local sandbox artifacts
 .worktrees/
 .sandbox-work/
+.repair-work-*/
 tmp/
 
 # OS / editor
