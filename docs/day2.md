@@ -57,8 +57,9 @@ The gate never ran a patch that touched a test. Implementation, in order:
 ## Honest limitations
 
 - One fixture, one bug, one model, one attempt. This is a vertical slice, not an evaluation.
-- The "bad patch blocked by the gate" scene still needs a scripted, repeatable version; today it is
-  covered by unit tests and by rules 1–3 above, not by a recorded live run.
+- At the time of this run the "bad patch blocked" scene was not scripted. It is now
+  repeatable offline with `python3 -m agent.demo`; those receipts explicitly use mock
+  responses and do not extend this historical live-model result.
 - The patch is applied as complete file contents, so very large files would blow the context
   budget; diffs are a later optimisation.
 - No Zoekt. `ripgrep` over a small repo is fast enough that an index would be decoration.
